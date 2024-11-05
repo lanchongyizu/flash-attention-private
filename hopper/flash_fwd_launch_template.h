@@ -206,22 +206,24 @@ void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr static int Headdim = 64;
     constexpr static bool UseCluster = false;
 
-    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-      BOOL_SWITCH(params.is_local, Is_local, [&] {
-        MMA_3WG_SWITCH(params.seqlen_q, kNumMmaWGs, [&] {
-          SEQLEN_SWITCH(params, Seqlen_traits, Seqlen_traits_Q, [&] {
-            BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
-              // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 192) % 2 == 0 && !Is_causal && !Is_local && !Is_split
-              //             && kNumMmaWGs == 3 && !Seqlen_traits::UseVarSeqLen, UseCluster, [&] {
-                run_flash_fwd<
-                  Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, 128, 4 + kNumMmaWGs * 4,
-                      2, false, UseCluster ? 2 : 1, T, !Seqlen_traits::UseVarSeqLen && Is_split>,
-                  Is_causal,
-                  Is_local && !Is_causal,
-                  Seqlen_traits,
-                  Seqlen_traits_Q
-                >(params, stream);
-              // });
+    BOOL_SWITCH(params.block_table!=nullptr, UseBlockTable, [&] {
+      BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(params.is_local, Is_local, [&] {
+          MMA_3WG_SWITCH(params.seqlen_q, kNumMmaWGs, [&] {
+            SEQLEN_SWITCH(params, Seqlen_traits, Seqlen_traits_Q, [&] {
+              BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
+                // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 192) % 2 == 0 && !Is_causal && !Is_local && !Is_split
+                //             && kNumMmaWGs == 3 && !Seqlen_traits::UseVarSeqLen, UseCluster, [&] {
+                  run_flash_fwd<
+                    Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, UseBlockTable ? 64 : 128, 4 + kNumMmaWGs * 4,
+                        2, false, UseCluster ? 2 : 1, T, !Seqlen_traits::UseVarSeqLen && Is_split>,
+                    Is_causal,
+                    Is_local && !Is_causal,
+                    Seqlen_traits,
+                    Seqlen_traits_Q
+                  >(params, stream);
+                // });
+              });
             });
           });
         });
@@ -243,7 +245,7 @@ void run_mha_fwd_hdim128(Flash_fwd_params &params, cudaStream_t stream) {
                 BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128) % 2 == 0 && !Is_causal && !Is_local && !Is_split
                             && kNumMmaWGs == 2 && !Seqlen_traits::UseVarSeqLen, UseCluster, [&] {
                   run_flash_fwd<
-                    Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, (Is_causal || Is_local || UseBlockTable) ? 128 : 176,
+                    Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, UseBlockTable ? 64 : (Is_causal || Is_local) ? 128 : 176,
                         4 + kNumMmaWGs * 4, 2, false, UseCluster ? 2 : 1, 
                         T, !Seqlen_traits::UseVarSeqLen && Is_split>, 
                     Is_causal,
@@ -390,24 +392,26 @@ template<typename T, int kBlockH>
 void run_mha_fwd_hdim64_gqa(Flash_fwd_params &params, cudaStream_t stream) {
   constexpr static int Headdim = 64;
   constexpr static bool UseCluster = false;
-  using Seqlen_traits = flash::FixedSeqLenTraits;
-  using Seqlen_traits_Q = flash::FixedGQASeqLenTraits;
 
-  MMA_3WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
-    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-      BOOL_SWITCH(params.is_local, Is_local, [&] {
-        BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
-          // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 192/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
-          //             && kNumMmaWGs == 3, UseCluster, [&] {
-            run_flash_fwd<
-              Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, 128, 4 + kNumMmaWGs * 4,
-                  2, false, UseCluster ? 2 : 1, T, !Seqlen_traits::UseVarSeqLen && Is_split, kBlockH>,
-              Is_causal,
-              Is_local && !Is_causal,
-              Seqlen_traits,
-              Seqlen_traits_Q
-            >(params, stream);
-          // });
+  BOOL_SWITCH(params.block_table != nullptr, UseBlockTable, [&] {
+    MMA_3WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
+      BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(params.is_local, Is_local, [&] {
+          GQA_SEQLEN_SWITCH(params, Seqlen_traits, Seqlen_traits_Q, [&] {
+            BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
+              // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 192/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
+              //             && kNumMmaWGs == 3, UseCluster, [&] {
+                run_flash_fwd<
+                  Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, UseBlockTable ? 64 : 128, 4 + kNumMmaWGs * 4,
+                      2, false, UseCluster ? 2 : 1, T, !Seqlen_traits::UseVarSeqLen && Is_split, kBlockH>,
+                  Is_causal,
+                  Is_local && !Is_causal,
+                  Seqlen_traits,
+                  Seqlen_traits_Q
+                >(params, stream);
+              // });
+            });
+          });
         });
       });
     });
@@ -418,24 +422,26 @@ template<typename T, int kBlockH>
 void run_mha_fwd_hdim128_gqa(Flash_fwd_params &params, cudaStream_t stream) {
   constexpr static int Headdim = 128;
   constexpr static bool UseCluster = false;
-  using Seqlen_traits = flash::FixedSeqLenTraits;
-  using Seqlen_traits_Q = flash::FixedGQASeqLenTraits;
 
-  MMA_2WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
-    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-      BOOL_SWITCH(params.is_local, Is_local, [&] {
-        BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
-          // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
-          //             && kNumMmaWGs == 2, UseCluster, [&] {
-            run_flash_fwd<
-              Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, (Is_causal || Is_local) ? 128 : 176,
-                  4 + kNumMmaWGs * 4, 2, false, UseCluster ? 2 : 1, T, Is_split, kBlockH>, 
-              Is_causal,
-              Is_local && !Is_causal,
-              Seqlen_traits,
-              Seqlen_traits_Q
-            >(params, stream);
-          // });
+  BOOL_SWITCH(params.block_table != nullptr, UseBlockTable, [&] {
+    MMA_2WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
+      BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(params.is_local, Is_local, [&] {
+          GQA_SEQLEN_SWITCH(params, Seqlen_traits, Seqlen_traits_Q, [&] {
+            BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
+              // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
+              //             && kNumMmaWGs == 2, UseCluster, [&] {
+                run_flash_fwd<
+                  Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, UseBlockTable ? 64 : (Is_causal || Is_local) ? 128 : 176,
+                      4 + kNumMmaWGs * 4, 2, false, UseCluster ? 2 : 1, T, Is_split, kBlockH>,
+                  Is_causal,
+                  Is_local && !Is_causal,
+                  Seqlen_traits,
+                  Seqlen_traits_Q
+                >(params, stream);
+              // });
+            });
+          });
         });
       });
     });
@@ -446,24 +452,26 @@ template<typename T, int kBlockH>
 void run_mha_fwd_hdim256_gqa(Flash_fwd_params &params, cudaStream_t stream) {
   constexpr static int Headdim = 256;
   constexpr static bool UseCluster = false;
-  using Seqlen_traits = flash::FixedSeqLenTraits;
-  using Seqlen_traits_Q = flash::FixedGQASeqLenTraits;
 
-  MMA_2WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
-    BOOL_SWITCH(params.is_causal, Is_causal, [&] {
-      BOOL_SWITCH(params.is_local, Is_local, [&] {
-        BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
-          // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
-          //             && kNumMmaWGs == 2, UseCluster, [&] {
-            run_flash_fwd<
-              Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, kNumMmaWGs == 1 ? 96 : 80,
-                  4 + kNumMmaWGs * 4, 2, false, UseCluster ? 2 : 1, T, Is_split, kBlockH>, 
-              Is_causal,
-              Is_local && !Is_causal,
-              Seqlen_traits,
-              Seqlen_traits_Q
-            >(params, stream);
-          // });
+  BOOL_SWITCH(params.block_table != nullptr, UseBlockTable, [&] {
+    MMA_2WG_SWITCH(kBlockH * params.seqlen_q, kNumMmaWGs, [&] {
+      BOOL_SWITCH(params.is_causal, Is_causal, [&] {
+        BOOL_SWITCH(params.is_local, Is_local, [&] {
+          GQA_SEQLEN_SWITCH(params, Seqlen_traits, Seqlen_traits_Q, [&] {
+            BOOL_SWITCH(params.num_splits > 1, Is_split, [&] {
+              // BOOL_SWITCH(cutlass::ceil_div(params.seqlen_q, 128/kBlockH) % 2 == 0 && !Is_causal && !Is_local && !Is_split
+              //             && kNumMmaWGs == 2, UseCluster, [&] {
+                run_flash_fwd<
+                  Flash_fwd_kernel_traits<Headdim, kNumMmaWGs * 64, UseBlockTable ? 64 : (kNumMmaWGs == 1 ? 96 : 80),
+                      4 + kNumMmaWGs * 4, 2, false, UseCluster ? 2 : 1, T, Is_split, kBlockH>,
+                  Is_causal,
+                  Is_local && !Is_causal,
+                  Seqlen_traits,
+                  Seqlen_traits_Q
+                >(params, stream);
+              // });
+            });
+          });
         });
       });
     });

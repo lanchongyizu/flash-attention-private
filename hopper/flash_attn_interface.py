@@ -262,6 +262,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         seqused_q=None,
         seqused_k=None,
         block_table=None,
+        return_softmax_lse=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -297,7 +298,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.causal = causal
         ctx.window_size = window_size
         ctx.deterministic = deterministic
-        return out, softmax_lse
+        return (out, softmax_lse) if return_softmax_lse else out
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -441,6 +442,7 @@ def flash_attn_varlen_func(
     seqused_q=None,
     seqused_k=None,
     block_table=None,
+    return_softmax_lse=False,
 ):
     """
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -498,6 +500,7 @@ def flash_attn_varlen_func(
         seqused_q,
         seqused_k,
         block_table,
+        return_softmax_lse,
     )
 
 
@@ -512,7 +515,7 @@ def flash_attn_with_kvcache(
     cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
     cache_batch_idx: Optional[torch.Tensor] = None,
     # cache_leftpad: Optional[torch.Tensor] = None,
-    # block_table: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -624,13 +627,16 @@ def flash_attn_with_kvcache(
     rotary_cos = None
     rotary_sin = None
     cache_leftpad = None
-    block_table = None
+    # block_table = None
     softcap = 0.0
     rotary_interleaved = True
     alibi_slopes = None
 
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+    assert (
+        block_table is None or k_cache.dtype != torch.float8_e4m3fn
+    ), "Paged Attention / block_table is not supported for fp8 just yet"
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
@@ -640,7 +646,7 @@ def flash_attn_with_kvcache(
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
     cache_batch_idx = maybe_contiguous(cache_batch_idx)
-    # block_table = maybe_contiguous(block_table)
+    block_table = maybe_contiguous(block_table)
     if gqa_parallel is None:
         gqa_parallel = True if q.shape[1] <= 64 else False
     # not in gqa/mqa setup

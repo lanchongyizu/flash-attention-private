@@ -70,8 +70,28 @@
         return __VA_ARGS__();                                                  \
       }                                                                        \
     } else {                                                                   \
+      if (usePagedKV) {                                                        \
+        using NAME = flash::PagedKVCacheSeqLenTraits;                          \
+        using NAME_Q = flash::FixedSeqLenTraits;                               \
+        return __VA_ARGS__();                                                  \
+      } else {                                                                 \
+        using NAME = flash::FixedSeqLenTraits;                                 \
+        using NAME_Q = flash::FixedSeqLenTraits;                               \
+        return __VA_ARGS__();                                                  \
+      }                                                                        \
+    }                                                                          \
+  }()
+
+#define GQA_SEQLEN_SWITCH(PARAMS, NAME, NAME_Q, ...)                           \
+  [&] {                                                                        \
+    const bool usePagedKV = PARAMS.page_block_size>0;                          \
+    if (usePagedKV) {                                                          \
+      using NAME = flash::PagedKVCacheSeqLenTraits;                            \
+      using NAME_Q = flash::FixedGQASeqLenTraits;                              \
+      return __VA_ARGS__();                                                    \
+    } else {                                                                   \
       using NAME = flash::FixedSeqLenTraits;                                   \
-      using NAME_Q = flash::FixedSeqLenTraits;                                 \
+      using NAME_Q = flash::FixedGQASeqLenTraits;                              \
       return __VA_ARGS__();                                                    \
     }                                                                          \
   }()

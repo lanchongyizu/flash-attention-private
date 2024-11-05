@@ -1,5 +1,6 @@
 import torch
 import flash_attn
+# import vllm.vllm_flash_attn as flash_attn
 import flash_attn_interface
 import itertools
 import time
@@ -32,6 +33,32 @@ def timeit(fn, *args, **kwargs):
 
     return avg_time
 
+def create_blocktable_kvcache(num_requests, context_seqlen, page_size, nheads_kv, headdim, dtype):
+    num_pages = num_requests * context_seqlen // page_size
+    assert context_seqlen % page_size == 0, "Max seqlen must be divisible by page size"
+    block_table = torch.reshape(
+        torch.arange(num_pages, dtype=torch.int32, device="cuda"), (num_requests, -1)
+    )
+    k_cache = torch.randn(
+        num_pages,
+        page_size,
+        nheads_kv,
+        headdim,
+        device="cuda",
+        dtype=dtype,
+        # requires_grad=True,
+    )
+    v_cache = torch.randn(
+        num_pages,
+        page_size,
+        nheads_kv,
+        headdim,
+        device="cuda",
+        dtype=dtype,
+        # requires_grad=True,
+    )
+    return block_table, k_cache, v_cache
+
 def main():
     num_sms = torch.cuda.get_device_properties(
         torch.cuda.current_device()
@@ -39,6 +66,14 @@ def main():
 
     max_splits = 129
     check_all_splits = False
+
+    paged_attn = False
+    # paged_attn = True
+    block_table = None
+    cache_idxs = None
+    FA3_PAGE_SIZE = 128
+    FA2_PAGE_SIZE = 256
+    # FA2_PAGE_SIZE = 16
 
     causal = True
     # causal = False
@@ -100,11 +135,14 @@ def main():
             num_work_tiles = nheads_kv * num_requests * math.ceil(query_seqlen/blockM_div_H)
 
             q = torch.randn((num_requests, query_seqlen, nheads_q, headdim), device="cuda", dtype=dtype)
-            cache_idxs = torch.randperm(num_caches, dtype=torch.int32, device="cuda")[:num_requests]
+            if not paged_attn:
+                cache_idxs = torch.randperm(num_caches, dtype=torch.int32, device="cuda")[:num_requests]
             cache_seqlens = torch.tensor(
                 [context_seqlen] * num_requests, dtype=torch.int32, device="cuda"
             )
 
+            if paged_attn:
+                block_table, k_cache, v_cache = create_blocktable_kvcache(num_requests, context_seqlen, FA2_PAGE_SIZE, nheads_kv, headdim, dtype)
             fa2_time_heuristic = timeit(
                 flash_attn.flash_attn_with_kvcache,
                 q=q,
@@ -113,7 +151,11 @@ def main():
                 cache_seqlens=cache_seqlens,
                 cache_batch_idx=cache_idxs,
                 causal=causal,
+                block_table=block_table,
             ) * 1000. * 1000.
+
+            if paged_attn:
+                block_table, k_cache, v_cache = create_blocktable_kvcache(num_requests, context_seqlen, FA3_PAGE_SIZE, nheads_kv, headdim, dtype)
             # fastest_splitk_time = float("inf")
             # fastest_splitk = 0
             # for i in range(1, max_splits):
@@ -153,6 +195,7 @@ def main():
                 causal=causal,
                 gqa_parallel=True,
                 num_splits=0,
+                block_table=block_table,
                 max_seqlen_k_hint=context_seqlen
             ) * 1000. * 1000.
 
@@ -171,6 +214,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=False,
+                        block_table=block_table,
                         num_splits=num_splits
                     ) * 1000. * 1000.
 
@@ -182,6 +226,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=False,
+                        block_table=block_table,
                         num_splits=num_splits
                     )
 
@@ -193,6 +238,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=False,
+                        block_table=block_table,
                         num_splits=1
                     )
 
@@ -221,6 +267,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=True,
+                        block_table=block_table,
                         num_splits=num_splits
                     ) * 1000. * 1000.
 
@@ -232,6 +279,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=True,
+                        block_table=block_table,
                         num_splits=num_splits
                     )
 
@@ -243,6 +291,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=True,
+                        block_table=block_table,
                         num_splits=1
                     )
 
@@ -275,6 +324,7 @@ def main():
                         # num_splits=num_splits_select,
                         # num_splits=1,
                         num_splits=0,
+                        block_table=block_table,
                         max_seqlen_k_hint=context_seqlen
                     ) * 1000. * 1000.
 
@@ -287,6 +337,7 @@ def main():
                         cache_batch_idx=cache_idxs,
                         causal=causal,
                         gqa_parallel=True,
+                        block_table=block_table,
                         num_splits=fa3_fastest_num_splits_gqa
                     ) * 1000. * 1000. 
 

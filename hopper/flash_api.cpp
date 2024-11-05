@@ -266,6 +266,7 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int batch_nheads, int 
             // Just split freely
             start_threshold = .8f;
         }
+        start_threshold = .8f;
         if (num_m_blocks > 1 && start_threshold < .5f)
             start_threshold += .05f * (std::log2f(num_n_blocksf) - 2);
     } else if (head_size == 256) {
@@ -366,7 +367,8 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int batch_nheads, int 
 std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, const int batch_size,
     const int num_heads, const int num_heads_k, const int head_size, const int max_seqlen_k, const int max_seqlen_q,
     const int head_size_rounded, const float p_dropout,
-    const int num_splits, cudaDeviceProp *dprops, bool use_gqa_packing, bool is_causal, struct c10::TensorOptions opts) {
+    const int num_splits, cudaDeviceProp *dprops, bool use_gqa_packing, bool is_causal, struct c10::TensorOptions opts,
+    bool use_block_table) {
     auto ceildiv = [](int a, int b) { return (a + b - 1) / b; };
 
     params.num_splits = num_splits;
@@ -385,6 +387,9 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
                 block_n = 176;
             } else if (head_size == 256) {
                 block_n = use_one_mma_wg ? 96 : 80;
+            }
+            if (use_block_table) {
+                block_n = 64;
             }
             const int num_n_blocks = (max_seqlen_k + block_n - 1) / block_n;
             const int batch_nheads = use_gqa_packing ? batch_size * num_heads_k : batch_size * num_heads;
@@ -690,7 +695,7 @@ mha_varlen_fwd(at::Tensor &q,  // total_q x num_heads x head_size, total_q := \s
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : k.size(0);
     const int page_block_size = !paged_KV ? -1 : k.size(1);
-    TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
+    TORCH_CHECK(!paged_KV || page_block_size % 16 == 0, "Paged KV cache block size must be divisible by 16");
 
     TORCH_CHECK(batch_size > 0, "batch size must be positive");
     TORCH_CHECK(head_size_og <= 256, "FlashAttention forward only supports head dimension at most 256");
@@ -1313,8 +1318,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : kcache.size(0);
-    const int page_block_size = !paged_KV ? 1 : kcache.size(1);
-    TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
+    const int page_block_size = !paged_KV ? -1 : kcache.size(1);
+    TORCH_CHECK(!paged_KV || page_block_size % 16 == 0, "Paged KV cache block size must be divisible by 16");
     const int seqlen_k = !paged_KV ? kcache.size(1) : max_num_blocks_per_seq * page_block_size;
     const int num_heads_k = kcache.size(2);
     const int batch_size_c = !paged_KV ? kcache.size(0) : batch_size;
@@ -1540,8 +1545,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
     std::tie(softmax_lse_accum, out_accum) = set_params_splitkv(
-       params, batch_size, num_heads, num_heads_k, head_size, max_seqlen_k_hint, seqlen_q,
-       head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, use_gqa_packing, is_causal, opts);
+       params, batch_size, num_heads, num_heads_k, head_size, seqlen_k, seqlen_q,
+       head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, use_gqa_packing, is_causal, opts, paged_KV);
     
     auto tile_count_semaphore = is_causal || params.is_local || params.num_splits != 1
         ? torch::zeros({1}, opts.dtype(torch::kInt32))
@@ -1553,6 +1558,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         params.block_table_batch_stride = block_table.stride(0);
     }
     params.page_block_size = page_block_size;
+    params.page_num_blocks = num_blocks;
 
     TORCH_CHECK(!alibi_slopes_.has_value(), "Alibi Slopes are not supported yet");
     //set_params_alibi(params, alibi_slopes_, batch_size, num_heads);
