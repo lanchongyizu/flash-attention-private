@@ -10,6 +10,7 @@ from flash_attn_interface import (
     _flash_attn_forward,
     flash_attn_func,
     flash_attn_varlen_func,
+    flash_attn_with_kvcache,
 )
 from tests.test_util import (
     attention_ref,
@@ -1182,6 +1183,178 @@ def test_flash_attn_varlen_paged2(
             dv_pt - dv_ref
         ).abs().max().item() + 1e-5
 
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+# @pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("mha_type", ["mha", "mqa", "gqa"])
+@pytest.mark.parametrize("causal", [False, True])
+# @pytest.mark.parametrize("causal", [False])
+# @pytest.mark.parametrize("d", [32, 59, 64, 80, 96, 111, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize("d", [32, 64, 96, 128, 160, 192, 224, 256])
+# @pytest.mark.parametrize('d', [128])
+# @pytest.mark.parametrize("d", [64, 128, 256])
+@pytest.mark.parametrize("d", [128, 64])
+# @pytest.mark.parametrize("d", [128])
+@pytest.mark.parametrize(
+    "seqlen_q,seqlen_k",
+    [
+        (1, 256),
+        (1, 512),
+        (1, 1024),
+        # (1, 1),
+        # (1, 3),
+        # (2, 1),
+        # (511, 1),
+        # (3, 513),
+        # (64, 128),
+        # (113, 203),
+        # (128, 128),
+        # (128, 217),
+        # (113, 211),
+        # (108, 256),
+        (256, 512),
+        # (384, 256),
+        (768, 512),
+        #  (512, 256),
+        # (640, 128),
+        (1024, 1024),
+        # (1023, 1024),
+        # (1024, 1023),
+        # (2048, 2048),
+    ],
+)
+@pytest.mark.parametrize("shuffle_pages", [True, False])
+# @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
+def test_flash_attn_kvcache_paged1(
+    seqlen_q,
+    seqlen_k,
+    d,
+    causal,
+    mha_type,
+    dtype,
+    shuffle_pages,
+):
+    run_conf = locals()
+    if (
+        max(seqlen_q, seqlen_k) >= 2048
+        and torch.cuda.get_device_properties("cuda").total_memory <= 16 * 2**30
+    ):
+        pytest.skip()  # Reference implementation OOM
+    device = "cuda"
+    # set seed
+    torch.random.manual_seed(0)
+    # batch_size = 1
+    # nheads = 1
+    batch_size = 9
+    nheads = 6
+    nheads_kv = 6 if mha_type == "mha" else (2 if mha_type == "gqa" else 1)
+
+    q = torch.randn(
+        batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True
+    )
+
+    page_size = 256
+    num_pages = batch_size * seqlen_k // page_size
+    assert seqlen_k % page_size == 0, "Max seqlen must be divisible by page size"
+    block_table = torch.reshape(
+        torch.arange(num_pages, dtype=torch.int32, device=device), (batch_size, -1)
+    )
+
+    k_paged = torch.randn(
+        num_pages,
+        page_size,
+        nheads_kv,
+        d,
+        device=device,
+        dtype=dtype,
+        requires_grad=True,
+    )
+    v_paged = torch.randn(
+        num_pages,
+        page_size,
+        nheads_kv,
+        d,
+        device=device,
+        dtype=dtype,
+        requires_grad=True,
+    )
+
+    if shuffle_pages:
+        block_table = torch.randperm(num_pages, dtype=torch.int32, device=device).view(
+            batch_size, -1
+        )
+        k = torch.index_select(k_paged, 0, block_table.view(-1)).view(
+            batch_size, seqlen_k, nheads_kv, d
+        )
+        v = torch.index_select(v_paged, 0, block_table.view(-1)).view(
+            batch_size, seqlen_k, nheads_kv, d
+        )
+    else:
+        k = torch.reshape(k_paged, (batch_size, seqlen_k, nheads_kv, d))
+        v = torch.reshape(v_paged, (batch_size, seqlen_k, nheads_kv, d))
+
+    cache_seqlens = torch.tensor([seqlen_k] * batch_size, dtype=torch.int32, device="cuda")
+
+    out, sm_lse = flash_attn_with_kvcache(
+        q,
+        k_paged,
+        v_paged,
+        cache_seqlens=cache_seqlens,
+        causal=causal,
+        block_table=block_table,
+        num_splits=1,
+        return_softmax_lse=True,
+        gqa_parallel=False,
+    )
+
+    out_unpaged, sm_unpaged_lse = flash_attn_with_kvcache(
+        q,
+        k,
+        v,
+        cache_seqlens=cache_seqlens,
+        causal=causal,
+        num_splits=1,
+        return_softmax_lse=True,
+        gqa_parallel=False,
+    )
+
+    dropout_mask = None
+
+    out_ref, attn_ref = attention_ref(
+        q,
+        k,
+        v,
+        None,
+        None,
+        causal=causal,
+    )
+    out_pt, attn_pt = attention_ref(
+        q,
+        k,
+        v,
+        None,
+        None,
+        causal=causal,
+        upcast=False,
+        reorder_ops=True,
+    )
+    # print(f"{k.stride()=}, {v.stride()=}, {k_paged.stride()=}, {v_paged.stride()=}, {block_table.stride()=}")
+    print(f"Output max diff: {(out - out_ref).abs().max().item()}")
+    print(f"Output mean diff: {(out - out_ref).abs().mean().item()}")
+    print(f"Pytorch max diff: {(out_pt - out_ref).abs().max().item()}")
+    print(f"Pytorch mean diff: {(out_pt - out_ref).abs().mean().item()}")
+
+    print(f"Output max diff paged vs unpaged: {(out - out_unpaged).abs().max().item()}")
+    print(
+        f"Output mean diff paged vs unpaged: {(out - out_unpaged).abs().mean().item()}"
+    )
+
+    # Check that FlashAttention's numerical error is at most twice the numerical error
+    # of a Pytorch implementation.
+    # import fbvscode; fbvscode.set_trace()
+    assert (out - out_ref).abs().max().item() <= 2 * (
+        out_pt - out_ref
+    ).abs().max().item()
 
 if __name__ == "__main__":
     test_flash_attn_varlen_causal(512, 768, False, 128, False, 256, torch.bfloat16)

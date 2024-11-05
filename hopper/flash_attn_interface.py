@@ -512,7 +512,7 @@ def flash_attn_with_kvcache(
     cache_seqlens: Optional[Union[(int, torch.Tensor)]] = None,
     cache_batch_idx: Optional[torch.Tensor] = None,
     # cache_leftpad: Optional[torch.Tensor] = None,
-    # block_table: Optional[torch.Tensor] = None,
+    block_table: Optional[torch.Tensor] = None,
     softmax_scale=None,
     causal=False,
     window_size=(-1, -1),  # -1 means infinite context window
@@ -624,13 +624,16 @@ def flash_attn_with_kvcache(
     rotary_cos = None
     rotary_sin = None
     cache_leftpad = None
-    block_table = None
+    # block_table = None
     softcap = 0.0
     rotary_interleaved = True
     alibi_slopes = None
 
     assert k_cache.stride(-1) == 1, "k_cache must have contiguous last dimension"
     assert v_cache.stride(-1) == 1, "v_cache must have contiguous last dimension"
+    assert (
+        block_table is None or k_cache.dtype != torch.float8_e4m3fn
+    ), "Paged Attention / block_table is not supported for fp8 just yet"
     q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)

@@ -1313,7 +1313,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
 
     const int max_num_blocks_per_seq = !paged_KV ? 0 : block_table.size(1);
     const int num_blocks = !paged_KV ? 0 : kcache.size(0);
-    const int page_block_size = !paged_KV ? 1 : kcache.size(1);
+    const int page_block_size = !paged_KV ? -1 : kcache.size(1);
     TORCH_CHECK(!paged_KV || page_block_size % 256 == 0, "Paged KV cache block size must be divisible by 256");
     const int seqlen_k = !paged_KV ? kcache.size(1) : max_num_blocks_per_seq * page_block_size;
     const int num_heads_k = kcache.size(2);
@@ -1553,6 +1553,7 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
         params.block_table_batch_stride = block_table.stride(0);
     }
     params.page_block_size = page_block_size;
+    params.page_num_blocks = num_blocks;
 
     TORCH_CHECK(!alibi_slopes_.has_value(), "Alibi Slopes are not supported yet");
     //set_params_alibi(params, alibi_slopes_, batch_size, num_heads);

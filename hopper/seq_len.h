@@ -16,7 +16,7 @@ static constexpr int kMaxTileSize = 128;
 
 template <bool UseVarSeqLen_, bool UsePagedKV_, bool UseGQAPacking_> class SeqLenTraits {
 public:
-  static_assert((!UsePagedKV_) || (UseVarSeqLen_ && UsePagedKV_), "PagedKV is only supported for VarSeqLen.");
+  // static_assert((!UsePagedKV_) || (UseVarSeqLen_ && UsePagedKV_), "PagedKV is only supported for VarSeqLen.");
   static_assert(!(UseVarSeqLen_ && UseGQAPacking_),
     "Variable sequence length with GQA parallelization not implemented yet.");
 
@@ -234,6 +234,7 @@ using FixedSeqLenTraits = SeqLenTraits<false, false, false>;
 using VarSeqLenTraits = SeqLenTraits<true, false, false>;
 using PagedSeqLenTraits = SeqLenTraits<true, true, false>;
 using FixedGQASeqLenTraits = SeqLenTraits<false, false, true>;
+using PagedKVCacheSeqLenTraits = SeqLenTraits<false, true, false>;
 
 template <>
 CUTLASS_DEVICE void VarSeqLenTraits::init(int bidb) {
@@ -446,6 +447,35 @@ CUTLASS_DEVICE auto PagedSeqLenTraits::get_local_tile_tensor(
     return g_tensor;
   }
 
+/////////////// PagedKVCacheSeqLenTraits /////////////////
+
+  // Returns the layout of a tensor in MKHB format in global memory.
+  // padded: only useful for var-seq-len for dq_accum and softmax_d.
+template<>
+CUTLASS_HOST_DEVICE auto PagedKVCacheSeqLenTraits::get_gmem_layout(
+    int m, int k, int h, int b,
+    int64_t m_stride, int64_t h_stride, int64_t b_stride,
+    int page_block_size, int num_blocks,
+    bool padded) const {
+  return static_cast<PagedKVCacheSeqLenTraits::LayoutT>(make_layout(make_shape((int)page_block_size, k, h, (int)num_blocks),
+                      make_stride(m_stride, cute::_1{}, h_stride, b_stride)));
+}
+
+template <>
+template <typename MTensor, typename Shape>
+CUTLASS_DEVICE auto PagedKVCacheSeqLenTraits::get_local_tile_tensor(
+      const MTensor &m_tensor, const Shape &tile_shape,
+      int bidh, int bidb, bool padded) const {
+
+    auto g_slice = m_tensor(_, _, bidh, bidb); // = m_tensor[:,:, head_idx, batch_idx]
+    auto g_seq_slice = make_tensor( // m_tensor[:actual_seq_len,:, head_idx, batch_idx]
+      g_slice.data(),
+      make_layout(cute::make_shape(actual_seq_len, get<1>(g_slice.layout().shape())), g_slice.layout().stride()));
+    // slice up into tiles
+    auto g_tensor = local_tile(
+      g_seq_slice, tile_shape, make_coord(_, _0{}));
+    return g_tensor;
+  }
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 } // namespace flash

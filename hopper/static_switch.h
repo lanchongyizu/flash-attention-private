@@ -70,9 +70,15 @@
         return __VA_ARGS__();                                                  \
       }                                                                        \
     } else {                                                                   \
-      using NAME = flash::FixedSeqLenTraits;                                   \
-      using NAME_Q = flash::FixedSeqLenTraits;                                 \
-      return __VA_ARGS__();                                                    \
+      if (usePagedKV) {                                                        \
+        using NAME = flash::PagedKVCacheSeqLenTraits;                          \
+        using NAME_Q = flash::FixedSeqLenTraits;                               \
+        return __VA_ARGS__();                                                  \
+      } else {                                                                 \
+        using NAME = flash::FixedSeqLenTraits;                                 \
+        using NAME_Q = flash::FixedSeqLenTraits;                               \
+        return __VA_ARGS__();                                                  \
+      }                                                                        \
     }                                                                          \
   }()
 
