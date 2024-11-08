@@ -262,6 +262,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         seqused_q=None,
         seqused_k=None,
         block_table=None,
+        return_softmax_lse=False,
     ):
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** (-0.5)
@@ -297,7 +298,7 @@ class FlashAttnVarlenFunc(torch.autograd.Function):
         ctx.causal = causal
         ctx.window_size = window_size
         ctx.deterministic = deterministic
-        return out, softmax_lse
+        return (out, softmax_lse) if return_softmax_lse else out
 
     @staticmethod
     def backward(ctx, dout, *args):
@@ -441,6 +442,7 @@ def flash_attn_varlen_func(
     seqused_q=None,
     seqused_k=None,
     block_table=None,
+    return_softmax_lse=False,
 ):
     """
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -498,6 +500,7 @@ def flash_attn_varlen_func(
         seqused_q,
         seqused_k,
         block_table,
+        return_softmax_lse,
     )
 
 
@@ -643,7 +646,7 @@ def flash_attn_with_kvcache(
         )
         cache_seqlens = maybe_contiguous(cache_seqlens)
     cache_batch_idx = maybe_contiguous(cache_batch_idx)
-    # block_table = maybe_contiguous(block_table)
+    block_table = maybe_contiguous(block_table)
     if gqa_parallel is None:
         gqa_parallel = True if q.shape[1] <= 64 else False
     # not in gqa/mqa setup

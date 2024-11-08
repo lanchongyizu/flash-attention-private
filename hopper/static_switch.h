@@ -82,6 +82,20 @@
     }                                                                          \
   }()
 
+#define GQA_SEQLEN_SWITCH(PARAMS, NAME, NAME_Q, ...)                           \
+  [&] {                                                                        \
+    const bool usePagedKV = PARAMS.page_block_size>0;                          \
+    if (usePagedKV) {                                                          \
+      using NAME = flash::PagedKVCacheSeqLenTraits;                            \
+      using NAME_Q = flash::FixedGQASeqLenTraits;                              \
+      return __VA_ARGS__();                                                    \
+    } else {                                                                   \
+      using NAME = flash::FixedSeqLenTraits;                                   \
+      using NAME_Q = flash::FixedGQASeqLenTraits;                              \
+      return __VA_ARGS__();                                                    \
+    }                                                                          \
+  }()
+
 #define SEQLEN_SWITCH_FWD(VAR_SEQ_LEN_Q, SEQ_USED_K, NAME_Q, NAME_K, ...)      \
   [&] {                                                                        \
     bool useVarSeqLenQ = VAR_SEQ_LEN_Q;                                        \
