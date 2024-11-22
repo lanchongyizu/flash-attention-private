@@ -266,6 +266,7 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int batch_nheads, int 
             // Just split freely
             start_threshold = .8f;
         }
+        start_threshold = .8f;
         if (num_m_blocks > 1 && start_threshold < .5f)
             start_threshold += .05f * (std::log2f(num_n_blocksf) - 2);
     } else if (head_size == 256) {
@@ -366,7 +367,8 @@ inline int num_splits_heuristic(int batch_nheads_mblocks, int batch_nheads, int 
 std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, const int batch_size,
     const int num_heads, const int num_heads_k, const int head_size, const int max_seqlen_k, const int max_seqlen_q,
     const int head_size_rounded, const float p_dropout,
-    const int num_splits, cudaDeviceProp *dprops, bool use_gqa_packing, bool is_causal, struct c10::TensorOptions opts) {
+    const int num_splits, cudaDeviceProp *dprops, bool use_gqa_packing, bool is_causal, struct c10::TensorOptions opts,
+    bool use_block_table) {
     auto ceildiv = [](int a, int b) { return (a + b - 1) / b; };
 
     params.num_splits = num_splits;
@@ -385,6 +387,9 @@ std::tuple<at::Tensor, at::Tensor> set_params_splitkv(Flash_fwd_params &params, 
                 block_n = 176;
             } else if (head_size == 256) {
                 block_n = use_one_mma_wg ? 96 : 80;
+            }
+            if (use_block_table) {
+                block_n = 64;
             }
             const int num_n_blocks = (max_seqlen_k + block_n - 1) / block_n;
             const int batch_nheads = use_gqa_packing ? batch_size * num_heads_k : batch_size * num_heads;
@@ -1540,8 +1545,8 @@ mha_fwd_kvcache(at::Tensor &q,                 // batch_size x seqlen_q x num_he
     // Keep references to these tensors to extend their lifetime
     at::Tensor softmax_lse_accum, out_accum;
     std::tie(softmax_lse_accum, out_accum) = set_params_splitkv(
-       params, batch_size, num_heads, num_heads_k, head_size, max_seqlen_k_hint, seqlen_q,
-       head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, use_gqa_packing, is_causal, opts);
+       params, batch_size, num_heads, num_heads_k, head_size, seqlen_k, seqlen_q,
+       head_size_rounded, /*dropout*/ 0.f, num_splits, dprops, use_gqa_packing, is_causal, opts, paged_KV);
     
     auto tile_count_semaphore = is_causal || params.is_local || params.num_splits != 1
         ? torch::zeros({1}, opts.dtype(torch::kInt32))

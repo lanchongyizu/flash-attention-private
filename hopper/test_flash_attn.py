@@ -1225,6 +1225,8 @@ def test_flash_attn_varlen_paged2(
 )
 @pytest.mark.parametrize("shuffle_pages", [True, False])
 # @pytest.mark.parametrize('seqlen_q,seqlen_k', [(128, 128)])
+@pytest.mark.parametrize("gqa_parallel", [False, True])
+@pytest.mark.parametrize("page_size", [16, 256])
 def test_flash_attn_kvcache_paged1(
     seqlen_q,
     seqlen_k,
@@ -1233,6 +1235,8 @@ def test_flash_attn_kvcache_paged1(
     mha_type,
     dtype,
     shuffle_pages,
+    gqa_parallel,
+    page_size,
 ):
     run_conf = locals()
     if (
@@ -1253,7 +1257,6 @@ def test_flash_attn_kvcache_paged1(
         batch_size, seqlen_q, nheads, d, device=device, dtype=dtype, requires_grad=True
     )
 
-    page_size = 256
     num_pages = batch_size * seqlen_k // page_size
     assert seqlen_k % page_size == 0, "Max seqlen must be divisible by page size"
     block_table = torch.reshape(
@@ -1293,7 +1296,12 @@ def test_flash_attn_kvcache_paged1(
         k = torch.reshape(k_paged, (batch_size, seqlen_k, nheads_kv, d))
         v = torch.reshape(v_paged, (batch_size, seqlen_k, nheads_kv, d))
 
-    cache_seqlens = torch.tensor([seqlen_k] * batch_size, dtype=torch.int32, device="cuda")
+    context_len =  seqlen_k - 8
+    cache_seqlens = torch.tensor([context_len] * batch_size, dtype=torch.int32, device="cuda")
+
+    arange = rearrange(torch.arange(seqlen_k, device=device), "s -> 1 s")
+    cache_seqlens_expanded = rearrange(cache_seqlens, "b -> b 1")
+    key_padding_mask = arange < cache_seqlens_expanded
 
     out, sm_lse = flash_attn_with_kvcache(
         q,
@@ -1304,7 +1312,7 @@ def test_flash_attn_kvcache_paged1(
         block_table=block_table,
         num_splits=1,
         return_softmax_lse=True,
-        gqa_parallel=False,
+        gqa_parallel=gqa_parallel,
     )
 
     out_unpaged, sm_unpaged_lse = flash_attn_with_kvcache(
@@ -1315,7 +1323,7 @@ def test_flash_attn_kvcache_paged1(
         causal=causal,
         num_splits=1,
         return_softmax_lse=True,
-        gqa_parallel=False,
+        gqa_parallel=gqa_parallel,
     )
 
     dropout_mask = None
@@ -1325,7 +1333,7 @@ def test_flash_attn_kvcache_paged1(
         k,
         v,
         None,
-        None,
+        key_padding_mask,
         causal=causal,
     )
     out_pt, attn_pt = attention_ref(
@@ -1333,7 +1341,7 @@ def test_flash_attn_kvcache_paged1(
         k,
         v,
         None,
-        None,
+        key_padding_mask,
         causal=causal,
         upcast=False,
         reorder_ops=True,
